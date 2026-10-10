@@ -1,56 +1,59 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { requestAnalysis } from "./api";
+import { BaseMap } from "./components/BaseMap";
 import { ChoroplethMap } from "./components/ChoroplethMap";
+import { AnalysisResultPanel } from "./components/AnalysisResultPanel";
 import { ErrorPanel } from "./components/ErrorPanel";
 import { Legend } from "./components/Legend";
-import { RankingTable } from "./components/RankingTable";
-import { ResultDetails } from "./components/ResultDetails";
-import { useColorScheme } from "./theme";
-import type { AnalysisResponse } from "./types";
 import { loadDemoAnalysis } from "./demo";
-import { BaseMap } from "./components/BaseMap";
+import { useColorScheme } from "./theme";
+import type { AnalysisResponse, WorkflowError } from "./types";
+import "./p3.css";
+import "./p4.css";
 
 const EXAMPLE = "서울에서 어린이 인구 대비 어린이집이 부족한 행정동을 알려줘.";
+const DEMO_MODE = new URLSearchParams(window.location.search).get("demo") === "1";
 
-const DEMO_MODE =
-  new URLSearchParams(window.location.search).get("demo") === "1";
+type FailedRun = { runId: string; errors: WorkflowError[] };
 
 function useElapsedSeconds(running: boolean): number {
   const [seconds, setSeconds] = useState(0);
+
   useEffect(() => {
     if (!running) return;
     setSeconds(0);
-    const timer = window.setInterval(() => setSeconds((s) => s + 1), 1000);
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, [running]);
+
   return seconds;
 }
 
 export function App() {
   const scheme = useColorScheme();
   const [question, setQuestion] = useState(EXAMPLE);
+  const [panelOpen, setPanelOpen] = useState(true);
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<AnalysisResponse | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [failedRun, setFailedRun] = useState<FailedRun | null>(null);
+  const [runningRunId, setRunningRunId] = useState<string | null>(null);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const elapsed = useElapsedSeconds(loading);
   const result = response?.result ?? null;
-  const [panelOpen, setPanelOpen] = useState(true);
 
+  // Demo Mode에서는 서버 없이 같은 분석 결과 UI를 사용한다.
   useEffect(() => {
     if (!DEMO_MODE) return;
-
     let active = true;
 
     loadDemoAnalysis()
       .then((data) => {
         if (active) setResponse(data);
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         if (active) {
-          setRequestError(
-            error instanceof Error ? error.message : String(error)
-          );
+          setRequestError(error instanceof Error ? error.message : String(error));
         }
       });
 
@@ -59,17 +62,29 @@ export function App() {
     };
   }, []);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!question.trim() || loading) return;
+  async function runAnalysis(text: string) {
+    if (!text || loading) return;
+
+    setPanelOpen(true);
     setLoading(true);
     setRequestError(null);
+    setFailedRun(null);
+    setRunningRunId(null);
+
     try {
-      setResponse(
-        DEMO_MODE
-          ? await loadDemoAnalysis()
-          : await requestAnalysis(question.trim())
-      );
+      const next = DEMO_MODE ? await loadDemoAnalysis() : await requestAnalysis(text);
+
+      if (next.status === "succeeded") {
+        if (!next.result) throw new Error("서버가 성공 상태를 반환했지만 분석 결과가 없습니다.");
+        setResponse(next);
+        setHoveredKey(null);
+      } else if (next.status === "failed") {
+        // 실패해도 직전 성공 결과는 지도에 남긴다.
+        setFailedRun({ runId: next.run_id, errors: next.errors });
+      } else {
+        // 현재 POST/GET 방식에서는 실제 단계별 진행 정보와 자동 폴링이 없다.
+        setRunningRunId(next.run_id);
+      }
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -77,10 +92,28 @@ export function App() {
     }
   }
 
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void runAnalysis(question.trim());
+  }
+
+  // 화면에 표시 중인 결과만 초기화한다. 서버의 실행 기록은 삭제하지 않는다.
+  function clearResult() {
+    if (loading) return;
+    setResponse(null);
+    setRequestError(null);
+    setFailedRun(null);
+    setRunningRunId(null);
+    setHoveredKey(null);
+    setPanelOpen(true);
+  }
+
+  const showingPreviousResult = Boolean(result) &&
+    (loading || requestError !== null || failedRun !== null || runningRunId !== null);
+
   return (
     <div className="app map-first">
-      {/* 전체화면 지도 */}
-      <main className="map-canvas">
+      <main className="map-canvas" aria-label="공간 분석 지도">
         {result ? (
           <ChoroplethMap
             result={result}
@@ -102,35 +135,46 @@ export function App() {
 
       <div className="map-gradient" aria-hidden="true" />
 
-      {/* 상단 헤더 */}
       <header className="floating-header">
         <div className="brand">
-          <div className="brand-mark">M</div>
-          <div>
+          <div className="brand-mark" aria-hidden="true">M</div>
+          <div className="p3-brand-text">
             <strong>MAPGPT</strong>
             <span>GEO SPATIAL AI</span>
           </div>
+          {DEMO_MODE && <span className="p3-demo-label">데모 · 가상 수치</span>}
         </div>
-
-        <button
-          type="button"
-          className="panel-toggle"
-          onClick={() => setPanelOpen(!panelOpen)}
-          aria-expanded={panelOpen}
-        >
-          {panelOpen ? "결과 접기" : "결과 보기"}
-        </button>
+        <div className="p4-header-actions">
+          {(result || requestError || failedRun || runningRunId) && (
+            <button
+              type="button"
+              className="panel-toggle p4-clear-button"
+              onClick={clearResult}
+              disabled={loading}
+              title="현재 화면의 분석 결과만 초기화합니다"
+            >
+              결과 초기화
+            </button>
+          )}
+          <button
+            type="button"
+            className="panel-toggle"
+            onClick={() => setPanelOpen((open) => !open)}
+            aria-controls="analysis-sidebar"
+            aria-expanded={panelOpen}
+          >
+            {panelOpen ? "결과 접기" : "결과 보기"}
+          </button>
+        </div>
       </header>
 
-      {/* 결과 패널 */}
       {panelOpen && (
-        <aside className="result-panel">
+        <aside id="analysis-sidebar" className="result-panel" aria-label="공간 분석 결과">
           <div className="result-panel-header">
             <div>
               <span className="eyebrow">AI ANALYSIS</span>
               <h2>공간 분석 결과</h2>
             </div>
-
             <button
               type="button"
               className="panel-close"
@@ -143,101 +187,104 @@ export function App() {
 
           <div className="result-panel-content">
             {loading && (
-              <section className="card progress" aria-live="polite">
-                <div className="spinner" aria-hidden />
+              <section className="card progress p3-feedback" role="status" aria-live="polite">
+                <div className="spinner" aria-hidden="true" />
                 <div>
-                  <strong>분석 중… {elapsed}초</strong>
-                  <p className="muted">
-                    분석 결과를 준비하고 있습니다.
-                  </p>
+                  <strong>분석 요청 중 · {elapsed}초</strong>
+                  <p className="muted">서버의 분석 결과를 기다리고 있습니다. 처리 시간은 질문과 모델에 따라 달라집니다.</p>
                 </div>
               </section>
             )}
 
             {requestError && (
-              <section className="card error" role="alert">
-                <h2>요청을 처리하지 못했습니다</h2>
+              <section className="card error p3-feedback" role="alert">
+                <h3>분석 요청에 실패했습니다</h3>
                 <p>{requestError}</p>
+                <button
+                  type="button"
+                  className="p3-retry"
+                  onClick={() => void runAnalysis(question.trim())}
+                  disabled={loading || !question.trim()}
+                >
+                  같은 질문 다시 시도
+                </button>
               </section>
             )}
 
-            {response?.status === "failed" && (
-              <ErrorPanel
-                errors={response.errors}
-                runId={response.run_id}
-              />
+            {failedRun && (
+              <div className="p3-feedback-group">
+                <ErrorPanel errors={failedRun.errors} runId={failedRun.runId} />
+                <button
+                  type="button"
+                  className="p3-retry"
+                  onClick={() => void runAnalysis(question.trim())}
+                  disabled={loading || !question.trim()}
+                >
+                  같은 질문 다시 시도
+                </button>
+              </div>
             )}
 
-            {!response && !loading && !requestError && (
-              <section className="card welcome-card">
-                <h2>지도에서 무엇을 알아볼까요?</h2>
+            {runningRunId && (
+              <section className="card p3-feedback" role="status">
+                <h3>서버에서 분석을 진행하고 있습니다</h3>
+                <p>
+                  서버가 진행 중 상태를 반환했습니다. 현재 화면은 실행 상태를 자동 조회하지 않습니다.
+                  결과가 완료되면 다시 확인해야 합니다.
+                </p>
                 <p className="muted">
-                  자연어로 질문하면 공공데이터를 기반으로
-                  공간 분석 결과를 지도에 표시합니다.
+                  실행 기록: <a href={`/api/analyses/${encodeURIComponent(runningRunId)}`} target="_blank" rel="noreferrer">{runningRunId}</a>
+                </p>
+              </section>
+            )}
+
+            {showingPreviousResult && (
+              <p className="p3-previous-result" role="status">
+                아래 지도와 순위는 이전에 완료한 분석 결과입니다.
+              </p>
+            )}
+
+            {!result && !loading && !requestError && !failedRun && !runningRunId && (
+              <section className="card welcome-card">
+                <h3>지도에서 무엇을 알아볼까요?</h3>
+                <p className="muted">
+                  질문을 입력하면 등록된 데이터를 바탕으로 공간 분석을 수행하고 지도·순위·근거를 보여줍니다.
                 </p>
               </section>
             )}
 
             {result && (
-              <>
-                <section className="card">
-                  <h2>분석 요약</h2>
-                  <p className="summary">{result.summary}</p>
-
-                  <p className="metric">
-                    <strong>{result.metric.label}</strong>
-                    <br />
-                    <span className="muted">
-                      {result.metric.interpretation}
-                    </span>
-                  </p>
-                </section>
-
-                <div className="mobile-legend">
-                  <Legend
-                    layer={result.map_layer}
-                    scheme={scheme}
-                  />
-                </div>
-
-                <RankingTable
-                  result={result}
-                  hoveredKey={hoveredKey}
-                  onHover={setHoveredKey}
-                />
-
-                <ResultDetails result={result} />
-              </>
+              <AnalysisResultPanel
+                key={result.run_id}
+                result={result}
+                scheme={scheme}
+                hoveredKey={hoveredKey}
+                onHover={setHoveredKey}
+              />
             )}
           </div>
         </aside>
       )}
 
-      {/* 하단 질문창 */}
-      <form className="prompt-dock" onSubmit={submit}>
+      <form className="prompt-dock" onSubmit={submit} aria-label="공간 분석 질문 입력">
         <div className="prompt-shell">
-          <span className="prompt-icon" aria-hidden="true">
-            ✦
-          </span>
-
+          <span className="prompt-icon" aria-hidden="true">✦</span>
           <input
             aria-label="공간 분석 질문"
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
             placeholder="지도에서 무엇을 찾아볼까요?"
             maxLength={500}
+            readOnly={DEMO_MODE}
           />
-
-          <button
-            type="submit"
-            disabled={loading || !question.trim()}
-          >
-            {loading ? "분석 중" : "분석"}
+          <button type="submit" disabled={loading || !question.trim()}>
+            {loading ? `분석 중 ${elapsed}초` : DEMO_MODE ? "데모 다시 보기" : "분석"}
           </button>
         </div>
-
         <p className="prompt-hint">
-          질문하면 답변이 아니라 지도가 만들어집니다.
+          {DEMO_MODE
+            ? "데모 모드: 지도와 분석 수치는 시연용이며 실제 분석 결과가 아닙니다."
+            : "질문을 입력하면 데이터 기반 공간 분석 결과를 지도로 보여줍니다."}
         </p>
       </form>
     </div>

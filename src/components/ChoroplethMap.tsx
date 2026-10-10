@@ -1,4 +1,3 @@
-
 import type { ExpressionSpecification } from "@maplibre/maplibre-gl-style-spec";
 import {
   type GeoJSONSource,
@@ -15,6 +14,7 @@ import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&ur
 import { useEffect, useRef } from "react";
 import { type ColorScheme, MAP_CHROME, NULL_REASONS, classColors, formatValue } from "../theme";
 import type { FinalResponse, UnitProperties } from "../types";
+import { MapResetControl } from "./MapResetControl";
 
 setWorkerUrl(maplibreWorkerUrl);
 
@@ -121,6 +121,13 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
     const clickPopup = new Popup({ closeButton: true, closeOnClick: false, maxWidth: "280px" });
 
     instance.addControl(new NavigationControl({ showCompass: false }), "top-right");
+    instance.addControl(
+      new MapResetControl(
+        () => fitResultBounds(instance, latest.current.result, latest.current.panelOpen),
+        "분석 범위 전체 보기",
+      ),
+      "top-right",
+    );
 
     instance.on("load", () => {
       // 행정구역은 배경 면 위, 지명 라벨 아래에 배치한다.
