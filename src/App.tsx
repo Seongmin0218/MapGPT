@@ -359,7 +359,7 @@ export function App() {
       <header className="floating-header">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
-            <img src="/logo.png" alt="" />
+            <img src="/MapGPT.png" alt="" />
           </div>
           <div className="p3-brand-text">
             <strong>MAPGPT</strong>
