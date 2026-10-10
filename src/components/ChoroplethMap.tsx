@@ -1,3 +1,4 @@
+
 import type { ExpressionSpecification } from "@maplibre/maplibre-gl-style-spec";
 import {
   type GeoJSONSource,
@@ -9,7 +10,7 @@ import {
   setWorkerUrl,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-// MapLibre v6: 번들러는 내부 worker 경로를 따라가지 못하므로 Vite가 번들한 worker URL을 지정한다.
+// MapLibre v6: Vite가 번들한 worker URL을 명시적으로 지정한다.
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { useEffect, useRef } from "react";
 import { type ColorScheme, MAP_CHROME, NULL_REASONS, classColors, formatValue } from "../theme";
@@ -29,7 +30,7 @@ function fillColor(result: FinalResponse, scheme: ColorScheme): ExpressionSpecif
   return ["case", ["==", value, null], MAP_CHROME[scheme].noData, classified];
 }
 
-// 라벨은 LLM이 만든 문자열이므로 HTML로 넣기 전에 반드시 이스케이프한다.
+// LLM이 만든 문자열은 팝업 HTML에 삽입하기 전에 반드시 이스케이프한다.
 function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
@@ -47,14 +48,45 @@ function tooltipHtml(result: FinalResponse, properties: UnitProperties): string 
     <div class="tooltip-value">${escapeHtml(metric_label)}: <b>${valueText}</b></div><table>${rows}</table></div>`;
 }
 
-function applyResult(map: MapLibreMap, result: FinalResponse, scheme: ColorScheme) {
+function fitResultBounds(map: MapLibreMap, result: FinalResponse, panelOpen: boolean) {
+  const bounds = new LngLatBounds();
+
+  for (const feature of result.map_layer.geojson.features) {
+    for (const polygon of feature.geometry.coordinates) {
+      for (const [x, y] of polygon[0]) {
+        bounds.extend([x, y]);
+      }
+    }
+  }
+
+  if (bounds.isEmpty()) return;
+
+  const rect = map.getContainer().getBoundingClientRect();
+  if (rect.width < 120 || rect.height < 120) return;
+
+  const mobile = window.matchMedia("(max-width: 860px)").matches;
+  const panel = panelOpen ? document.querySelector<HTMLElement>(".result-panel") : null;
+  const panelRect = panel?.getBoundingClientRect();
+
+  const requestedLeft = !mobile && panelRect ? panelRect.right - rect.left + 24 : 24;
+  const requestedBottom = mobile && panelRect ? rect.bottom - panelRect.top + 24 : 110;
+
+  const top = Math.min(100, Math.floor(rect.height * 0.2));
+  const right = 24;
+  const left = Math.max(0, Math.min(Math.ceil(requestedLeft), rect.width - right - 80));
+  const bottom = Math.max(0, Math.min(Math.ceil(requestedBottom), rect.height - top - 80));
+
+  map.fitBounds(bounds, {
+    padding: { top, right, bottom, left },
+    duration: 0,
+    maxZoom: 12,
+  });
+}
+
+function applyResult(map: MapLibreMap, result: FinalResponse, scheme: ColorScheme, panelOpen: boolean) {
   (map.getSource(SOURCE) as GeoJSONSource).setData(result.map_layer.geojson);
   map.setPaintProperty("units-fill", "fill-color", fillColor(result, scheme));
-  const bounds = new LngLatBounds();
-  for (const feature of result.map_layer.geojson.features) {
-    for (const polygon of feature.geometry.coordinates) for (const [x, y] of polygon[0]) bounds.extend([x, y]);
-  }
-  if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 24, duration: 0 });
+  fitResultBounds(map, result, panelOpen);
 }
 
 interface Props {
@@ -62,36 +94,57 @@ interface Props {
   scheme: ColorScheme;
   hoveredKey: string | null;
   onHover: (key: string | null) => void;
+  panelOpen: boolean;
 }
 
-export function ChoroplethMap({ result, scheme, hoveredKey, onHover }: Props) {
+export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<MapLibreMap | null>(null);
   const ready = useRef(false);
-  const latest = useRef({ result, onHover });
-  latest.current = { result, onHover };
+  const latest = useRef({ result, onHover, hoveredKey, panelOpen });
+  latest.current = { result, onHover, hoveredKey, panelOpen };
 
-  // 배경지도 스타일이 테마마다 다르므로 테마가 바뀌면 지도를 다시 만든다.
+  // 배경지도 스타일이 바뀌면 MapLibre 지도를 새로 생성한다.
   useEffect(() => {
+    if (!container.current) return;
+
     const chrome = MAP_CHROME[scheme];
     const instance = new MapLibreMap({
-      container: container.current!,
+      container: container.current,
       style: chrome.basemapStyle,
       center: [126.98, 37.56],
       zoom: 10,
       attributionControl: { customAttribution: "경계: 통계청 SGIS" },
     });
-    const popup = new Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
+
+    const hoverPopup = new Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
+    const clickPopup = new Popup({ closeButton: true, closeOnClick: false, maxWidth: "280px" });
+
     instance.addControl(new NavigationControl({ showCompass: false }), "top-right");
+
     instance.on("load", () => {
-      // Choropleth는 도로·면 레이어 위, 마지막 레이블 묶음 아래에 둔다.
+      // 행정구역은 배경 면 위, 지명 라벨 아래에 배치한다.
       const layers = instance.getStyle().layers;
       const lastShape = layers.findLastIndex((layer) => layer.type !== "symbol");
       const beforeId = layers.slice(lastShape + 1).find((layer) => layer.type === "symbol")?.id;
-      instance.addSource(SOURCE, { type: "geojson", data: latest.current.result.map_layer.geojson, promoteId: "unit_key" });
-      instance.addLayer({ id: LAYERS[0], type: "fill", source: SOURCE, paint: { "fill-opacity": 0.85 } }, beforeId);
+
+      instance.addSource(SOURCE, {
+        type: "geojson",
+        data: latest.current.result.map_layer.geojson,
+        promoteId: "unit_key",
+      });
+
       instance.addLayer(
-        { id: LAYERS[1], type: "line", source: SOURCE, paint: { "line-width": 0.8, "line-color": chrome.separator } },
+        { id: LAYERS[0], type: "fill", source: SOURCE, paint: { "fill-opacity": 0.85 } },
+        beforeId,
+      );
+      instance.addLayer(
+        {
+          id: LAYERS[1],
+          type: "line",
+          source: SOURCE,
+          paint: { "line-width": 0.8, "line-color": chrome.separator },
+        },
         beforeId,
       );
       instance.addLayer(
@@ -106,44 +159,106 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover }: Props) {
         },
         beforeId,
       );
+
       ready.current = true;
-      applyResult(instance, latest.current.result, scheme);
+      applyResult(instance, latest.current.result, scheme, latest.current.panelOpen);
+
+      if (latest.current.hoveredKey !== null) {
+        instance.setFeatureState(
+          { source: SOURCE, id: latest.current.hoveredKey },
+          { hover: true },
+        );
+      }
     });
+
+    // 마우스 hover: 일시적인 팝업과 표/지도 강조 동기화
     instance.on("mousemove", LAYERS[0], (event: MapLayerMouseEvent) => {
       const feature = event.features?.[0];
       if (!feature) return;
+
       instance.getCanvas().style.cursor = "pointer";
       latest.current.onHover(feature.properties.unit_key as string);
-      popup.setLngLat(event.lngLat).setHTML(tooltipHtml(latest.current.result, feature.properties as UnitProperties)).addTo(instance);
+
+      if (clickPopup.isOpen()) return;
+      hoverPopup
+        .setLngLat(event.lngLat)
+        .setHTML(tooltipHtml(latest.current.result, feature.properties as UnitProperties))
+        .addTo(instance);
     });
+
     instance.on("mouseleave", LAYERS[0], () => {
       instance.getCanvas().style.cursor = "";
       latest.current.onHover(null);
-      popup.remove();
+      hoverPopup.remove();
     });
+
+    // 클릭 및 모바일 탭: 닫기 버튼이 있는 고정 팝업
+    instance.on("click", (event) => {
+      if (!ready.current) return;
+
+      const feature = instance.queryRenderedFeatures(event.point, { layers: [LAYERS[0]] })[0];
+      if (!feature) {
+        clickPopup.remove();
+        return;
+      }
+
+      hoverPopup.remove();
+      clickPopup
+        .setLngLat(event.lngLat)
+        .setHTML(tooltipHtml(latest.current.result, feature.properties as UnitProperties))
+        .addTo(instance);
+    });
+
+    const handleResize = () => {
+      instance.resize();
+      if (ready.current) {
+        fitResultBounds(instance, latest.current.result, latest.current.panelOpen);
+      }
+    };
+    window.addEventListener("resize", handleResize);
+
     map.current = instance;
     return () => {
+      window.removeEventListener("resize", handleResize);
+      hoverPopup.remove();
+      clickPopup.remove();
       ready.current = false;
       map.current = null;
       instance.remove();
     };
   }, [scheme]);
 
-  // 새 분석 결과 반영
+  // 새 분석 결과를 기존 지도 레이어에 반영한다.
   useEffect(() => {
-    if (map.current && ready.current) applyResult(map.current, result, scheme);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result]);
+    if (!map.current || !ready.current) return;
+    applyResult(map.current, result, scheme, panelOpen);
+  }, [result, scheme]);
 
-  // 표 ↔ 지도 hover 연동
+  // 패널의 열림/닫힘에 따라 지도 중심과 배율을 다시 맞춘다.
+  useEffect(() => {
+    if (!map.current || !ready.current) return;
+    fitResultBounds(map.current, result, panelOpen);
+  }, [panelOpen, result]);
+
+  // 표 ↔ 지도 hover 강조 상태를 동기화한다.
   useEffect(() => {
     const instance = map.current;
     if (!instance || !ready.current || hoveredKey === null) return;
+
     instance.setFeatureState({ source: SOURCE, id: hoveredKey }, { hover: true });
     return () => {
-      if (instance.getSource(SOURCE)) instance.setFeatureState({ source: SOURCE, id: hoveredKey }, { hover: false });
+      if (instance.getSource(SOURCE)) {
+        instance.setFeatureState({ source: SOURCE, id: hoveredKey }, { hover: false });
+      }
     };
   }, [hoveredKey]);
 
-  return <div ref={container} className="map" role="img" aria-label={`${result.map_layer.metric_label} Choropleth 지도`} />;
+  return (
+    <div
+      ref={container}
+      className="map"
+      role="img"
+      aria-label={`${result.map_layer.metric_label} Choropleth 지도`}
+    />
+  );
 }
