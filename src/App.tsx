@@ -358,7 +358,9 @@ export function App() {
 
       <header className="floating-header">
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true">M</div>
+          <div className="brand-mark" aria-hidden="true">
+            <img src="/logo.png" alt="" />
+          </div>
           <div className="p3-brand-text">
             <strong>MAPGPT</strong>
             <span>GEO SPATIAL AI</span>
