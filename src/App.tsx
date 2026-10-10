@@ -1,5 +1,10 @@
-import { type FormEvent, useEffect, useState } from "react";
-import { requestAnalysis } from "./api";
+import { type FormEvent, useEffect, useRef, useState } from "react";
+import { getStoredAnalysis, requestAnalysis } from "./api";
+import type { StoredAnalysis } from "./api";
+import { RecentRuns } from "./components/RecentRuns";
+import { ExecutionTrace } from "./components/ExecutionTrace";
+import { addRecentRun, readRecentRuns, saveRecentRuns } from "./runHistory";
+import type { RecentRun } from "./runHistory";
 import { BaseMap } from "./components/BaseMap";
 import { ChoroplethMap } from "./components/ChoroplethMap";
 import { AnalysisResultPanel } from "./components/AnalysisResultPanel";
@@ -8,8 +13,12 @@ import { Legend } from "./components/Legend";
 import { loadDemoAnalysis } from "./demo";
 import { useColorScheme } from "./theme";
 import type { AnalysisResponse, WorkflowError } from "./types";
+import type { FocusRequest } from "./components/ChoroplethMap";
 import "./p3.css";
 import "./p4.css";
+import "./p5.css";
+import "./p6.css";
+import "./p7.css";
 
 const EXAMPLE = "서울에서 어린이 인구 대비 어린이집이 부족한 행정동을 알려줘.";
 const DEMO_MODE = new URLSearchParams(window.location.search).get("demo") === "1";
@@ -31,14 +40,24 @@ function useElapsedSeconds(running: boolean): number {
 
 export function App() {
   const scheme = useColorScheme();
-  const [question, setQuestion] = useState(EXAMPLE);
+  const [question, setQuestion] = useState("");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<AnalysisResponse | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [failedRun, setFailedRun] = useState<FailedRun | null>(null);
   const [runningRunId, setRunningRunId] = useState<string | null>(null);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
+  const [storedRun, setStoredRun] = useState<StoredAnalysis | null>(null);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceError, setTraceError] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [recentRuns, setRecentRuns] = useState<RecentRun[]>(readRecentRuns);
+  // 늦게 도착한 이전 요청 응답이 새 지도를 덮어쓰지 않도록 구분한다.
+  const requestSequence = useRef(0);
   const elapsed = useElapsedSeconds(loading);
   const result = response?.result ?? null;
 
@@ -62,39 +81,217 @@ export function App() {
     };
   }, []);
 
-  async function runAnalysis(text: string) {
-    if (!text || loading) return;
+  useEffect(() => {
+    if (!DEMO_MODE) saveRecentRuns(recentRuns);
+  }, [recentRuns]);
 
-    setPanelOpen(true);
+  function rememberRun(runId: string, text: string) {
+    setRecentRuns((previous) => addRecentRun(previous, runId, text));
+  }
+
+  function updateRunUrl(runId: string | null, replace = false) {
+    if (DEMO_MODE) return;
+    const url = new URL(window.location.href);
+    if (runId) url.searchParams.set("run", runId);
+    else url.searchParams.delete("run");
+    if (replace) window.history.replaceState(null, "", url);
+    else window.history.pushState(null, "", url);
+  }
+
+  async function fetchTrace(runId: string, sequence: number) {
+    setTraceLoading(true);
+    setTraceError(null);
+    try {
+      const record = await getStoredAnalysis(runId);
+      if (requestSequence.current !== sequence) return;
+      setStoredRun(record);
+    } catch (error) {
+      if (requestSequence.current !== sequence) return;
+      setTraceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (requestSequence.current === sequence) setTraceLoading(false);
+    }
+  }
+
+  async function loadRun(runId: string) {
+    if (DEMO_MODE) return;
+    const sequence = ++requestSequence.current;
     setLoading(true);
     setRequestError(null);
     setFailedRun(null);
     setRunningRunId(null);
+    setStoredRun(null);
+    setTraceError(null);
+    setTraceLoading(false);
+    setLinkCopied(false);
+    setResponse(null);
+    setHoveredKey(null);
+    setSelectedKey(null);
+    setFocusRequest(null);
+    setPanelOpen(true);
+    setMobileExpanded(false);
+
+    try {
+      const record = await getStoredAnalysis(runId);
+      if (requestSequence.current !== sequence) return;
+      setStoredRun(record);
+      setQuestion(record.question);
+      rememberRun(record.run_id, record.question);
+      if (record.status === "succeeded") {
+        if (!record.result) throw new Error("완료된 실행 기록에 분석 결과가 없습니다.");
+        setResponse({ run_id: record.run_id, status: "succeeded", result: record.result, errors: [] });
+      } else if (record.status === "failed") {
+        setFailedRun({ runId: record.run_id, errors: record.provenance?.errors ?? [] });
+      } else {
+        setRunningRunId(record.run_id);
+      }
+    } catch (error) {
+      if (requestSequence.current !== sequence) return;
+      setRequestError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (requestSequence.current === sequence) setLoading(false);
+    }
+  }
+
+  // URL 주소창 직접 진입 및 브라우저 뒤로/앞으로 이동 대응.
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    const restore = () => {
+      const runId = new URLSearchParams(window.location.search).get("run");
+      if (runId) void loadRun(runId);
+      else {
+        ++requestSequence.current;
+        setLoading(false);
+        setResponse(null);
+        setStoredRun(null);
+        setRequestError(null);
+        setFailedRun(null);
+        setRunningRunId(null);
+        setHoveredKey(null);
+        setSelectedKey(null);
+        setFocusRequest(null);
+        setTraceLoading(false);
+        setTraceError(null);
+        setLinkCopied(false);
+      }
+    };
+    restore();
+    window.addEventListener("popstate", restore);
+    return () => {
+      window.removeEventListener("popstate", restore);
+      ++requestSequence.current;
+    };
+    // 초기 진입 및 브라우저 탐색에서만 호출한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function openRecentRun(runId: string) {
+    if (loading) return;
+    updateRunUrl(runId);
+    void loadRun(runId);
+  }
+
+  function removeRecentRun(runId: string) {
+    setRecentRuns((previous) => previous.filter((entry) => entry.runId !== runId));
+  }
+
+  function refreshTrace(runId: string) {
+    if (DEMO_MODE) return;
+    void fetchTrace(runId, requestSequence.current);
+  }
+
+  async function copyRunLink(runId: string) {
+    if (DEMO_MODE) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("demo");
+    url.searchParams.set("run", runId);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setLinkCopied(true);
+    } catch {
+      setLinkCopied(false);
+      setTraceError("링크를 복사하지 못했습니다. 주소창의 ?run=... 링크를 직접 복사해주세요.");
+    }
+  }
+
+  async function runAnalysis(text: string) {
+    if (!text || loading) return;
+
+    setPanelOpen(true);
+    setMobileExpanded(false);
+    setLoading(true);
+    setRequestError(null);
+    setFailedRun(null);
+    setRunningRunId(null);
+    setStoredRun(null);
+    setTraceError(null);
+    setTraceLoading(false);
+    setLinkCopied(false);
+    const sequence = ++requestSequence.current;
 
     try {
       const next = DEMO_MODE ? await loadDemoAnalysis() : await requestAnalysis(text);
+      if (requestSequence.current !== sequence) return;
 
       if (next.status === "succeeded") {
         if (!next.result) throw new Error("서버가 성공 상태를 반환했지만 분석 결과가 없습니다.");
         setResponse(next);
         setHoveredKey(null);
+        setSelectedKey(null);
+        setFocusRequest(null);
+        if (!DEMO_MODE) {
+          updateRunUrl(next.run_id);
+          rememberRun(next.run_id, next.result.question);
+          void fetchTrace(next.run_id, sequence);
+        }
       } else if (next.status === "failed") {
         // 실패해도 직전 성공 결과는 지도에 남긴다.
         setFailedRun({ runId: next.run_id, errors: next.errors });
+        if (!DEMO_MODE) {
+          updateRunUrl(next.run_id);
+          rememberRun(next.run_id, text);
+          void fetchTrace(next.run_id, sequence);
+        }
       } else {
         // 현재 POST/GET 방식에서는 실제 단계별 진행 정보와 자동 폴링이 없다.
         setRunningRunId(next.run_id);
       }
     } catch (error) {
-      setRequestError(error instanceof Error ? error.message : String(error));
+      if (requestSequence.current === sequence) {
+        setRequestError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setLoading(false);
+      if (requestSequence.current === sequence) setLoading(false);
     }
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void runAnalysis(question.trim());
+  }
+
+  // 지도 클릭은 지역만 선택하고, 순위표 클릭은 해당 지역까지 이동한다.
+  function selectFromMap(key: string | null) {
+    setSelectedKey(key);
+    if (key !== null) {
+      setPanelOpen(true);
+      setMobileExpanded(false);
+    }
+  }
+
+  function selectFromRanking(key: string) {
+    setSelectedKey(key);
+    setPanelOpen(true);
+    setMobileExpanded(false);
+    setFocusRequest((previous) => ({
+      unitKey: key,
+      sequence: (previous?.sequence ?? 0) + 1,
+    }));
+  }
+
+  function clearSelection() {
+    setSelectedKey(null);
+    setFocusRequest(null);
   }
 
   // 화면에 표시 중인 결과만 초기화한다. 서버의 실행 기록은 삭제하지 않는다.
@@ -104,15 +301,35 @@ export function App() {
     setRequestError(null);
     setFailedRun(null);
     setRunningRunId(null);
+    setStoredRun(null);
+    setTraceError(null);
+    setTraceLoading(false);
+    setLinkCopied(false);
+    ++requestSequence.current;
+    updateRunUrl(null);
     setHoveredKey(null);
+    clearSelection();
     setPanelOpen(true);
+    setMobileExpanded(false);
   }
+
+  // 모바일에서는 지역을 선택했을 때 상세 카드를 먼저 보여준다.
+  useEffect(() => {
+    if (!selectedKey || !window.matchMedia("(max-width: 860px)").matches) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("analysis-sidebar-content")?.scrollTo({
+        top: 0,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedKey]);
 
   const showingPreviousResult = Boolean(result) &&
     (loading || requestError !== null || failedRun !== null || runningRunId !== null);
 
   return (
-    <div className="app map-first">
+    <div className={`app map-first${!panelOpen ? " p6-panel-hidden" : mobileExpanded ? " p6-sheet-expanded" : ""}`}>
       <main className="map-canvas" aria-label="공간 분석 지도">
         {result ? (
           <ChoroplethMap
@@ -120,7 +337,11 @@ export function App() {
             scheme={scheme}
             hoveredKey={hoveredKey}
             onHover={setHoveredKey}
+            selectedKey={selectedKey}
+            onSelect={selectFromMap}
+            focusRequest={focusRequest}
             panelOpen={panelOpen}
+            panelExpanded={mobileExpanded}
           />
         ) : (
           <BaseMap scheme={scheme} />
@@ -169,23 +390,47 @@ export function App() {
       </header>
 
       {panelOpen && (
-        <aside id="analysis-sidebar" className="result-panel" aria-label="공간 분석 결과">
+        <aside id="analysis-sidebar" className={`result-panel${mobileExpanded ? " p6-expanded" : ""}`} aria-label="공간 분석 결과">
           <div className="result-panel-header">
             <div>
               <span className="eyebrow">AI ANALYSIS</span>
               <h2>공간 분석 결과</h2>
             </div>
-            <button
-              type="button"
-              className="panel-close"
-              onClick={() => setPanelOpen(false)}
-              aria-label="결과 패널 닫기"
-            >
-              ×
-            </button>
+            <div className="p6-panel-actions">
+              <button
+                type="button"
+                className="p6-expand-button"
+                onClick={() => setMobileExpanded((expanded) => !expanded)}
+                aria-expanded={mobileExpanded}
+                aria-controls="analysis-sidebar-content"
+              >
+                {mobileExpanded ? "축소" : "확장"}
+              </button>
+              <button
+                type="button"
+                className="panel-close"
+                onClick={() => {
+                  setPanelOpen(false);
+                  setMobileExpanded(false);
+                }}
+                aria-label="결과 패널 닫기"
+              >
+                ×
+              </button>
+            </div>
           </div>
 
-          <div className="result-panel-content">
+          <div id="analysis-sidebar-content" className="result-panel-content">
+            {!DEMO_MODE && (
+              <RecentRuns
+                entries={recentRuns}
+                currentRunId={result?.run_id ?? failedRun?.runId ?? runningRunId}
+                disabled={loading}
+                onOpen={openRecentRun}
+                onRemove={removeRecentRun}
+                onClear={() => setRecentRuns([])}
+              />
+            )}
             {loading && (
               <section className="card progress p3-feedback" role="status" aria-live="polite">
                 <div className="spinner" aria-hidden="true" />
@@ -214,6 +459,21 @@ export function App() {
             {failedRun && (
               <div className="p3-feedback-group">
                 <ErrorPanel errors={failedRun.errors} runId={failedRun.runId} />
+                {!DEMO_MODE && (
+                  <>
+                    <button type="button" className="analysis-evidence-link" onClick={() => void copyRunLink(failedRun.runId)}>
+                      {linkCopied ? "실패한 실행의 링크 복사 완료" : "실패한 실행의 링크 복사"}
+                    </button>
+                    <ExecutionTrace
+                      provenance={storedRun?.run_id === failedRun.runId ? storedRun.provenance : null}
+                      runId={failedRun.runId}
+                      loading={traceLoading}
+                      error={traceError}
+                      demo={false}
+                      onRefresh={() => refreshTrace(failedRun.runId)}
+                    />
+                  </>
+                )}
                 <button
                   type="button"
                   className="p3-retry"
@@ -260,6 +520,16 @@ export function App() {
                 scheme={scheme}
                 hoveredKey={hoveredKey}
                 onHover={setHoveredKey}
+                selectedKey={selectedKey}
+                onSelect={selectFromRanking}
+                onClearSelection={clearSelection}
+                provenance={storedRun?.run_id === result.run_id ? storedRun.provenance : null}
+                traceLoading={traceLoading}
+                traceError={traceError}
+                demo={DEMO_MODE}
+                onRefreshTrace={() => refreshTrace(result.run_id)}
+                onCopyLink={() => void copyRunLink(result.run_id)}
+                linkCopied={linkCopied}
               />
             )}
           </div>
@@ -269,14 +539,13 @@ export function App() {
       <form className="prompt-dock" onSubmit={submit} aria-label="공간 분석 질문 입력">
         <div className="prompt-shell">
           <span className="prompt-icon" aria-hidden="true">✦</span>
-          <input
-            aria-label="공간 분석 질문"
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="지도에서 무엇을 찾아볼까요?"
-            maxLength={500}
-            readOnly={DEMO_MODE}
-          />
+            <input
+              aria-label="공간 분석 질문"
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder={EXAMPLE}
+              maxLength={500}
+            />
           <button type="submit" disabled={loading || !question.trim()}>
             {loading ? `분석 중 ${elapsed}초` : DEMO_MODE ? "데모 다시 보기" : "분석"}
           </button>

@@ -6,6 +6,8 @@ interface Props {
   result: FinalResponse;
   hoveredKey: string | null;
   onHover: (key: string | null) => void;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
 }
 
 interface Row {
@@ -13,13 +15,13 @@ interface Row {
   properties: UnitProperties;
 }
 
-export function RankingTable({ result, hoveredKey, onHover }: Props) {
+export function RankingTable({ result, hoveredKey, onHover, selectedKey, onSelect }: Props) {
   const [showAll, setShowAll] = useState(false);
   const metric = result.metric.name;
   const rankMetric = result.rank_metric;
   const columns = Object.entries(result.metric_labels).filter(([name]) => name !== metric && name !== rankMetric);
 
-  // 표 보기: 지도와 같은 전체 단위를 순위순으로 (값 없는 단위는 맨 뒤)
+  // 응답에 이미 포함된 순위를 정렬에만 이용한다. 순위를 새로 계산하지 않는다.
   const allRows = useMemo<Row[]>(() => {
     const rows = result.map_layer.geojson.features.map((feature) => ({
       rank: rankMetric ? (feature.properties[rankMetric] as number | null) : null,
@@ -52,16 +54,30 @@ export function RankingTable({ result, hoveredKey, onHover }: Props) {
           <tbody>
             {rows.map(({ rank, properties }) => {
               const value = properties[metric] as number | null;
+              const selected = selectedKey === properties.unit_key;
               return (
                 <tr
                   key={properties.unit_key}
-                  className={properties.unit_key === hoveredKey ? "hovered" : undefined}
+                  className={selected ? "p5-selected-row" : properties.unit_key === hoveredKey ? "hovered" : undefined}
                   onMouseEnter={() => onHover(properties.unit_key)}
                   onMouseLeave={() => onHover(null)}
+                  onClick={() => onSelect(properties.unit_key)}
                 >
                   <td className="num">{rank ?? "–"}</td>
                   <td className="place">
-                    <span className="muted">{properties.parent_name}</span> {properties.unit_name}
+                    <span className="muted">{properties.parent_name}</span>{" "}
+                    <button
+                      type="button"
+                      className="p5-region-button"
+                      aria-pressed={selected}
+                      title={`${properties.unit_name} 지도에서 찾기`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelect(properties.unit_key);
+                      }}
+                    >
+                      {properties.unit_name}
+                    </button>
                   </td>
                   <td className="num strong">
                     {value === null ? (NULL_REASONS[properties.null_reason ?? ""] ?? "값 없음") : formatValue(value)}

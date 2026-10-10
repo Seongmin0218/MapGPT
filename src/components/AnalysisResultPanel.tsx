@@ -1,23 +1,52 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Legend } from "./Legend";
 import { RankingTable } from "./RankingTable";
 import { ResultDetails } from "./ResultDetails";
-import type { ColorScheme } from "../theme";
+import { ExecutionTrace } from "./ExecutionTrace";
+import type { RunProvenance } from "../api";
+import { type ColorScheme, formatValue, NULL_REASONS } from "../theme";
 import type { FinalResponse } from "../types";
 import "./analysis-result.css";
 
-type PanelView = "overview" | "evidence";
+type PanelView = "overview" | "evidence" | "trace";
 
 interface Props {
   result: FinalResponse;
   scheme: ColorScheme;
   hoveredKey: string | null;
   onHover: (key: string | null) => void;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+  onClearSelection: () => void;
+  provenance: RunProvenance | null;
+  traceLoading: boolean;
+  traceError: string | null;
+  demo: boolean;
+  onRefreshTrace: () => void;
+  onCopyLink: () => void;
+  linkCopied: boolean;
 }
 
 /** 백엔드 계산 결과를 그대로 표시한다. 지표·순위·구간을 프런트에서 재계산하지 않는다. */
-export function AnalysisResultPanel({ result, scheme, hoveredKey, onHover }: Props) {
+export function AnalysisResultPanel({
+  result, scheme, hoveredKey, onHover, selectedKey, onSelect, onClearSelection,
+  provenance, traceLoading, traceError, demo, onRefreshTrace, onCopyLink, linkCopied,
+}: Props) {
   const [view, setView] = useState<PanelView>("overview");
+
+  // 지도에서 새 지역을 고르면 상세 정보를 볼 수 있는 화면으로 돌아온다.
+  useEffect(() => {
+    if (selectedKey !== null) setView("overview");
+  }, [selectedKey]);
+
+  const selected = selectedKey
+    ? result.map_layer.geojson.features.find((feature) => feature.properties.unit_key === selectedKey)?.properties
+    : null;
+  const selectedMetric = selected?.[result.metric.name];
+  const selectedRank = result.rank_metric ? selected?.[result.rank_metric] : null;
+  const detailMetrics = Object.entries(result.metric_labels).filter(
+    ([key]) => key !== result.metric.name && key !== result.rank_metric,
+  );
 
   return (
     <div className="analysis-result">
@@ -37,6 +66,14 @@ export function AnalysisResultPanel({ result, scheme, hoveredKey, onHover }: Pro
           onClick={() => setView("evidence")}
         >
           분석 근거
+        </button>
+        <button
+          type="button"
+          className={view === "trace" ? "active" : undefined}
+          aria-pressed={view === "trace"}
+          onClick={() => setView("trace")}
+        >
+          실행 기록
         </button>
       </div>
 
@@ -69,8 +106,47 @@ export function AnalysisResultPanel({ result, scheme, hoveredKey, onHover }: Pro
             <Legend layer={result.map_layer} scheme={scheme} />
           </div>
 
+          {selected && (
+            <section className="card p5-selected-card" aria-label="선택한 지역의 분석 상세">
+              <div className="p5-selected-header">
+                <div>
+                  <p className="analysis-eyebrow">SELECTED AREA</p>
+                  <h3>{selected.parent_name ? `${selected.parent_name} ` : ""}{selected.unit_name}</h3>
+                </div>
+                <button type="button" onClick={onClearSelection} className="p5-clear-selection">선택 해제</button>
+              </div>
+              <div className="p5-selected-metric">
+                <span>{result.metric.label}</span>
+                <strong>
+                  {typeof selectedMetric === "number"
+                    ? formatValue(selectedMetric)
+                    : NULL_REASONS[selected.null_reason ?? ""] ?? "값 없음"}
+                </strong>
+              </div>
+              {typeof selectedRank === "number" && (
+                <p className="p5-selected-rank">분석 순위: {formatValue(selectedRank, 0)}위</p>
+              )}
+              {detailMetrics.length > 0 && (
+                <dl className="p5-detail-list">
+                  {detailMetrics.map(([key, label]) => (
+                    <div key={key}>
+                      <dt>{label}</dt>
+                      <dd>{typeof selected[key] === "number" ? formatValue(selected[key] as number) : "값 없음"}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </section>
+          )}
+
           {result.ranking.length > 0 ? (
-            <RankingTable result={result} hoveredKey={hoveredKey} onHover={onHover} />
+            <RankingTable
+              result={result}
+              hoveredKey={hoveredKey}
+              onHover={onHover}
+              selectedKey={selectedKey}
+              onSelect={onSelect}
+            />
           ) : (
             <section className="card">
               <h3>지역 순위</h3>
@@ -82,7 +158,7 @@ export function AnalysisResultPanel({ result, scheme, hoveredKey, onHover }: Pro
             데이터 출처와 분석 방법 확인 <span aria-hidden="true">→</span>
           </button>
         </>
-      ) : (
+      ) : view === "evidence" ? (
         <>
           <section className="card analysis-evidence-intro">
             <h3>분석 근거</h3>
@@ -91,6 +167,22 @@ export function AnalysisResultPanel({ result, scheme, hoveredKey, onHover }: Pro
             </p>
           </section>
           <ResultDetails result={result} />
+        </>
+      ) : (
+        <>
+          {!demo && (
+            <button type="button" className="analysis-evidence-link" onClick={onCopyLink}>
+              {linkCopied ? "결과 주소 복사 완료" : "이 분석 결과의 링크 복사"} <span aria-hidden="true">↗</span>
+            </button>
+          )}
+          <ExecutionTrace
+            provenance={provenance}
+            runId={result.run_id}
+            loading={traceLoading}
+            error={traceError}
+            demo={demo}
+            onRefresh={onRefreshTrace}
+          />
         </>
       )}
     </div>

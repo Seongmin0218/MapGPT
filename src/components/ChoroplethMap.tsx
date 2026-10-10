@@ -21,6 +21,12 @@ setWorkerUrl(maplibreWorkerUrl);
 const SOURCE = "units";
 const LAYERS = ["units-fill", "units-separator", "units-hover"];
 
+// 표에서 지역을 선택할 때마다 sequence가 증가하므로 같은 행을 다시 눌러도 이동할 수 있다.
+export interface FocusRequest {
+  unitKey: string;
+  sequence: number;
+}
+
 function fillColor(result: FinalResponse, scheme: ColorScheme): ExpressionSpecification {
   const { metric, classification } = result.map_layer;
   const colors = classColors(scheme, classification.class_count);
@@ -83,6 +89,39 @@ function fitResultBounds(map: MapLibreMap, result: FinalResponse, panelOpen: boo
   });
 }
 
+function focusFeature(map: MapLibreMap, result: FinalResponse, key: string, panelOpen: boolean) {
+  const feature = result.map_layer.geojson.features.find((item) => item.properties.unit_key === key);
+  if (!feature) return;
+
+  const bounds = new LngLatBounds();
+  for (const polygon of feature.geometry.coordinates) {
+    for (const [x, y] of polygon[0]) bounds.extend([x, y]);
+  }
+  if (bounds.isEmpty()) return;
+
+  const rect = map.getContainer().getBoundingClientRect();
+  const panelRect = panelOpen
+    ? document.querySelector<HTMLElement>(".result-panel")?.getBoundingClientRect()
+    : undefined;
+  const mobile = window.matchMedia("(max-width: 860px)").matches;
+  const top = Math.min(100, Math.floor(rect.height * 0.2));
+  const right = 24;
+  const left = Math.max(0, Math.min(
+    !mobile && panelRect ? Math.ceil(panelRect.right - rect.left + 24) : 24,
+    rect.width - right - 80,
+  ));
+  const bottom = Math.max(0, Math.min(
+    mobile && panelRect ? Math.ceil(rect.bottom - panelRect.top + 24) : 110,
+    rect.height - top - 80,
+  ));
+
+  map.fitBounds(bounds, {
+    padding: { top, right, bottom, left },
+    maxZoom: 13.5,
+    duration: 450,
+  });
+}
+
 function applyResult(map: MapLibreMap, result: FinalResponse, scheme: ColorScheme, panelOpen: boolean) {
   (map.getSource(SOURCE) as GeoJSONSource).setData(result.map_layer.geojson);
   map.setPaintProperty("units-fill", "fill-color", fillColor(result, scheme));
@@ -95,14 +134,21 @@ interface Props {
   hoveredKey: string | null;
   onHover: (key: string | null) => void;
   panelOpen: boolean;
+  panelExpanded: boolean;
+  selectedKey: string | null;
+  onSelect: (key: string | null) => void;
+  focusRequest: FocusRequest | null;
 }
 
-export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }: Props) {
+export function ChoroplethMap({
+  result, scheme, hoveredKey, onHover, panelOpen, panelExpanded, selectedKey, onSelect, focusRequest,
+}: Props) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<MapLibreMap | null>(null);
   const ready = useRef(false);
-  const latest = useRef({ result, onHover, hoveredKey, panelOpen });
-  latest.current = { result, onHover, hoveredKey, panelOpen };
+  const latest = useRef({ result, onHover, hoveredKey, panelOpen, selectedKey, onSelect, focusRequest });
+  latest.current = { result, onHover, hoveredKey, panelOpen, selectedKey, onSelect, focusRequest };
+  const clickPopupRef = useRef<Popup | null>(null);
 
   // 배경지도 스타일이 바뀌면 MapLibre 지도를 새로 생성한다.
   useEffect(() => {
@@ -119,6 +165,7 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
 
     const hoverPopup = new Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
     const clickPopup = new Popup({ closeButton: true, closeOnClick: false, maxWidth: "280px" });
+    clickPopupRef.current = clickPopup;
 
     instance.addControl(new NavigationControl({ showCompass: false }), "top-right");
     instance.addControl(
@@ -161,7 +208,12 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
           source: SOURCE,
           paint: {
             "line-color": chrome.hover,
-            "line-width": ["case", ["boolean", ["feature-state", "hover"], false], 2.5, 0],
+            "line-width": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false], 4,
+              ["boolean", ["feature-state", "hover"], false], 2.5,
+              0,
+            ],
           },
         },
         beforeId,
@@ -175,6 +227,15 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
           { source: SOURCE, id: latest.current.hoveredKey },
           { hover: true },
         );
+      }
+      if (latest.current.selectedKey !== null) {
+        instance.setFeatureState(
+          { source: SOURCE, id: latest.current.selectedKey },
+          { selected: true },
+        );
+      }
+      if (latest.current.focusRequest) {
+        focusFeature(instance, latest.current.result, latest.current.focusRequest.unitKey, latest.current.panelOpen);
       }
     });
 
@@ -206,9 +267,11 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
       const feature = instance.queryRenderedFeatures(event.point, { layers: [LAYERS[0]] })[0];
       if (!feature) {
         clickPopup.remove();
+        latest.current.onSelect(null);
         return;
       }
 
+      latest.current.onSelect(feature.properties.unit_key as string);
       hoverPopup.remove();
       clickPopup
         .setLngLat(event.lngLat)
@@ -229,6 +292,7 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
       window.removeEventListener("resize", handleResize);
       hoverPopup.remove();
       clickPopup.remove();
+      clickPopupRef.current = null;
       ready.current = false;
       map.current = null;
       instance.remove();
@@ -245,7 +309,31 @@ export function ChoroplethMap({ result, scheme, hoveredKey, onHover, panelOpen }
   useEffect(() => {
     if (!map.current || !ready.current) return;
     fitResultBounds(map.current, result, panelOpen);
-  }, [panelOpen, result]);
+  }, [panelOpen, panelExpanded, result]);
+
+  // 지역을 선택하면 마우스 hover와 무관하게 굵은 경계선을 유지한다.
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !ready.current || selectedKey === null) {
+      if (selectedKey === null) clickPopupRef.current?.remove();
+      return;
+    }
+
+    instance.setFeatureState({ source: SOURCE, id: selectedKey }, { selected: true });
+    return () => {
+      if (instance.getSource(SOURCE)) {
+        instance.setFeatureState({ source: SOURCE, id: selectedKey }, { selected: false });
+      }
+    };
+  }, [selectedKey]);
+
+  // 순위표 클릭 시 대상 행정구역으로 이동한다. 지도 클릭은 지도를 이동시키지 않는다.
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !ready.current || focusRequest === null) return;
+    clickPopupRef.current?.remove();
+    focusFeature(instance, result, focusRequest.unitKey, panelOpen);
+  }, [focusRequest, result, panelOpen]);
 
   // 표 ↔ 지도 hover 강조 상태를 동기화한다.
   useEffect(() => {
