@@ -47,7 +47,20 @@ export function ResultDetails({ result }: { result: FinalResponse }) {
         <List items={result.limitations} />
       </details>
       <p className="muted provenance">
-        실행 기록(Provenance): <a href={`/api/analyses/${result.run_id}`} target="_blank" rel="noreferrer">{result.run_id}</a>
+        {result.run_id.startsWith("demo-") ? (
+          "데모 데이터: 실제 서버 실행 기록이 없습니다."
+        ) : (
+          <>
+            실행 기록(Provenance):{" "}
+            <a
+              href={`/api/analyses/${result.run_id}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {result.run_id}
+            </a>
+          </>
+        )}
       </p>
     </>
   );

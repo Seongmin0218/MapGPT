@@ -7,9 +7,13 @@ import { RankingTable } from "./components/RankingTable";
 import { ResultDetails } from "./components/ResultDetails";
 import { useColorScheme } from "./theme";
 import type { AnalysisResponse } from "./types";
+import { loadDemoAnalysis } from "./demo";
 
 const EXAMPLE = "서울에서 어린이 인구 대비 어린이집이 부족한 행정동을 알려줘.";
 const STEPS = ["질문 해석", "데이터 선택", "분석 계획", "계획 검증", "GIS 실행", "결과 검증", "지도·설명"];
+
+const DEMO_MODE =
+  new URLSearchParams(window.location.search).get("demo") === "1";
 
 function useElapsedSeconds(running: boolean): number {
   const [seconds, setSeconds] = useState(0);
@@ -32,13 +36,39 @@ export function App() {
   const elapsed = useElapsedSeconds(loading);
   const result = response?.result ?? null;
 
+  useEffect(() => {
+    if (!DEMO_MODE) return;
+
+    let active = true;
+
+    loadDemoAnalysis()
+      .then((data) => {
+        if (active) setResponse(data);
+      })
+      .catch((error) => {
+        if (active) {
+          setRequestError(
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!question.trim() || loading) return;
     setLoading(true);
     setRequestError(null);
     try {
-      setResponse(await requestAnalysis(question.trim()));
+      setResponse(
+        DEMO_MODE
+          ? await loadDemoAnalysis()
+          : await requestAnalysis(question.trim())
+      );
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -49,7 +79,11 @@ export function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>MapGPT <span className="muted">공간 분석 Agent</span></h1>
+        <h1>{DEMO_MODE && (
+          <span className="demo-badge">
+            DEMO · 가상 분석 수치
+          </span>
+        )}MapGPT <span className="muted">공간 분석 Agent</span></h1>
         <form className="question" onSubmit={submit}>
           <input
             aria-label="공간 분석 질문"
@@ -57,9 +91,14 @@ export function App() {
             onChange={(event) => setQuestion(event.target.value)}
             placeholder={EXAMPLE}
             maxLength={500}
+            readOnly={DEMO_MODE}
           />
           <button type="submit" disabled={loading || !question.trim()}>
-            {loading ? "분석 중…" : "분석"}
+            {loading
+              ? "불러오는 중…"
+              : DEMO_MODE
+                ? "데모 다시 보기"
+                : "분석"}
           </button>
         </form>
       </header>
